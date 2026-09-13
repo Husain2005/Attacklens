@@ -1,15 +1,18 @@
 """
 AttackLens - Automated Attack Timeline Reconstruction & Incident Investigation Engine
-Full Self-Contained Web Platform Application with Strict Input Validation
+Full Self-Contained Web Platform Application with Email/File Threat Scanner
 """
 
 import re
 import json
 import tempfile
 import uuid
+import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
+import email
+from email import policy
 
 import pandas as pd
 import plotly.express as px
@@ -76,7 +79,7 @@ class Incident(BaseModel):
     executive_summary: str = ""
 
 # ==============================================================================
-# 2. LOG PARSERS WITH INPUT VALIDATION
+# 2. LOG PARSERS WITH FLEXIBLE TEXT HANDLING
 # ==============================================================================
 
 class MultiFormatParser:
@@ -92,13 +95,12 @@ class MultiFormatParser:
         lines = content.splitlines()
         current_year = datetime.utcnow().year
 
-        # Regex Signatures
         ssh_failed = r"Failed password for (invalid user )?(\S+) from (\S+) port (\d+) ssh2"
         ssh_success = r"Accepted (password|publickey) for (\S+) from (\S+) port (\d+) ssh2"
         sudo_regex = r"sudo:\s+(\S+) : TTY=\S+ ; USER=(\S+) ; COMMAND=(.*)"
         kv_regex = r'(\w+)=["\']?([^"\'\s]+)["\']?'
 
-        for line in lines:
+        for line_num, line in enumerate(lines, 1):
             line = line.strip()
             if not line:
                 continue
@@ -107,7 +109,6 @@ class MultiFormatParser:
             parts = line.split()
             host = parts[3] if len(parts) >= 4 else "UNKNOWN_HOST"
 
-            # Try parsing syslog timestamp "Oct 12 14:23:01"
             if len(parts) >= 3:
                 try:
                     raw_ts = f"{current_year} {' '.join(parts[:3])}"
@@ -126,7 +127,7 @@ class MultiFormatParser:
                     username=failed_match.group(2),
                     src_ip=failed_match.group(3),
                     event_type="FAILED_LOGIN",
-                    command_line=line,
+                    command_line=line[:500],
                     raw_data={"raw_line": line}
                 ))
                 continue
@@ -142,7 +143,7 @@ class MultiFormatParser:
                     username=success_match.group(2),
                     src_ip=success_match.group(3),
                     event_type="SUCCESSFUL_LOGIN",
-                    command_line=line,
+                    command_line=line[:500],
                     raw_data={"raw_line": line}
                 ))
                 continue
@@ -157,7 +158,7 @@ class MultiFormatParser:
                     host=host,
                     username=sudo_match.group(1),
                     process_name="sudo",
-                    command_line=sudo_match.group(3),
+                    command_line=sudo_match.group(3)[:500],
                     event_type="PRIVILEGE_ESCALATION",
                     raw_data={"raw_line": line}
                 ))
@@ -185,13 +186,13 @@ class MultiFormatParser:
                 ))
                 continue
 
-            # Fallback Generic Line Parser
+            # Universal Fallback for Long / Custom Logs
             events.append(NormalizedEvent(
-                event_id="GENERIC_TEXT",
+                event_id=f"LOG_LINE_{line_num}",
                 timestamp=ts,
                 source_format=default_source,
                 host=host if host != "UNKNOWN_HOST" else "HOST",
-                command_line=line,
+                command_line=line[:1000],
                 raw_data={"raw_line": line}
             ))
 
@@ -496,11 +497,80 @@ class ScoringEngine:
         )
 
 # ==============================================================================
-# 4. STREAMLIT WEB INTERFACE WITH VALIDATION
+# 4. MALICIOUS FILE & EMAIL ANALYZER ENGINE
+# ==============================================================================
+
+class ThreatScanner:
+    SUSPICIOUS_EXTENSIONS = ['.exe', '.vbs', '.js', '.scr', '.bat', '.ps1', '.docm', '.xlsm', '.zip', '.iso']
+    SUSPICIOUS_KEYWORDS = ['password', 'urgent', 'login', 'verify', 'update', 'invoice', 'bank', 'wire', 'account']
+
+    @classmethod
+    def analyze_file(cls, filename: str, content: bytes) -> Dict[str, Any]:
+        sha256_hash = hashlib.sha256(content).hexdigest()
+        md5_hash = hashlib.md5(content).hexdigest()
+        ext = Path(filename).suffix.lower()
+
+        is_suspicious_ext = ext in cls.SUSPICIOUS_EXTENSIONS
+        findings = []
+        score = 0
+
+        if is_suspicious_ext:
+            score += 40
+            findings.append(f"Dangerous or executable extension detected: '{ext}'")
+
+        # Check binary signatures (e.g., Executable header MZ)
+        if content.startswith(b'MZ'):
+            score += 30
+            findings.append("Executable magic header (MZ) detected in binary content.")
+
+        # Email Inspection (.eml or .msg)
+        email_metadata = None
+        if ext in ['.eml', '.msg', '.txt'] or b"Received:" in content[:500]:
+            try:
+                msg = email.message_from_bytes(content, policy=policy.default)
+                email_metadata = {
+                    "Subject": msg.get("subject", "N/A"),
+                    "From": msg.get("from", "N/A"),
+                    "To": msg.get("to", "N/A"),
+                    "Date": msg.get("date", "N/A")
+                }
+                body = msg.get_body(preferencelist=('plain', 'html'))
+                body_text = body.get_content() if body else ""
+
+                # Extract URLs in body
+                urls = re.findall(r"https?://[^\s<>\"']+", body_text)
+                if urls:
+                    findings.append(f"Extracted {len(urls)} link(s) from email body.")
+                    score += 15
+
+                # Check subject keywords
+                subj = str(msg.get("subject", "")).lower()
+                for kw in cls.SUSPICIOUS_KEYWORDS:
+                    if kw in subj:
+                        score += 10
+                        findings.append(f"Suspicious keyword '{kw}' found in Subject line.")
+            except Exception:
+                pass
+
+        status = "MALICIOUS / HIGH RISK" if score >= 40 else ("SUSPICIOUS" if score >= 20 else "CLEAN / LOW RISK")
+
+        return {
+            "filename": filename,
+            "size_bytes": len(content),
+            "sha256": sha256_hash,
+            "md5": md5_hash,
+            "score": score,
+            "status": status,
+            "findings": findings,
+            "email_metadata": email_metadata
+        }
+
+# ==============================================================================
+# 5. STREAMLIT WEB INTERFACE
 # ==============================================================================
 
 st.set_page_config(
-    page_title="AttackLens | Automated Incident Reconstruction Platform",
+    page_title="AttackLens | Incident & Threat Intelligence Platform",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -515,203 +585,240 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🛡️ AttackLens SOC Investigation Engine")
-st.caption("Enterprise Automated Attack Timeline Reconstruction Platform")
+st.caption("Automated Incident Timeline Reconstruction & Malicious Threat Inspection")
 
-# Sidebar Upload Controls & Input Validations
-st.sidebar.header("📁 Multi-Source Log Ingestion")
+# Navigation Tabs
+nav_tab1, nav_tab2 = st.tabs(["📊 Incident Log Reconstruction", "🔍 Email & File Threat Inspector"])
 
-# Option 1: File Upload
-uploaded_files = st.sidebar.file_uploader(
-    "1. Upload Security Log Files",
-    type=["json", "csv", "xml", "log", "txt", "syslog", "auth"],
-    accept_multiple_files=True
-)
+with nav_tab1:
+    st.sidebar.header("📁 Multi-Source Log Ingestion")
 
-st.sidebar.markdown("---")
+    # Option 1: File Upload
+    uploaded_files = st.sidebar.file_uploader(
+        "1. Upload Security Log Files",
+        type=["json", "csv", "xml", "log", "txt", "syslog", "auth"],
+        accept_multiple_files=True
+    )
 
-# Option 2: Direct Text Input
-st.sidebar.subheader("2. Paste Raw Logs / Text Direct")
-raw_text_input = st.sidebar.text_area(
-    "Paste Auth Logs, Syslog, or Text Strings here",
-    height=150,
-    placeholder="Sep 12 08:30:12 srv-db01 sshd[14220]: Failed password for invalid user admin from 198.51.100.42 port 52102 ssh2..."
-)
+    st.sidebar.markdown("---")
 
-raw_events = []
-MAX_FILE_SIZE_MB = 50
+    # Option 2: Direct Text Input
+    st.sidebar.subheader("2. Paste Raw Logs Direct")
+    raw_text_input = st.sidebar.text_area(
+        "Paste Auth Logs, Syslog, or Raw Text Strings",
+        height=180,
+        placeholder="Sep 12 08:30:12 srv-db01 sshd[14220]: Failed password for invalid user admin from 198.51.100.42 port 52102 ssh2..."
+    )
 
-# --- INGESTION & VALIDATION ENGINE ---
-if uploaded_files or (raw_text_input and raw_text_input.strip()):
-    with st.spinner("Validating and parsing log inputs..."):
-        
-        # Process Uploaded Files with Validation
-        if uploaded_files:
-            for file in uploaded_files:
-                # File Size Validation
-                if file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                    st.error(f"❌ File '{file.name}' exceeds the maximum allowed size of {MAX_FILE_SIZE_MB}MB.")
-                    continue
+    # Explicit Action Button to run log analysis
+    run_log_analysis = st.sidebar.button("⚡ Run Log Analysis Engine", type="primary")
 
-                content_bytes = file.getvalue()
-                if not content_bytes or not content_bytes.strip():
-                    st.warning(f"⚠️ File '{file.name}' is empty. Skipping.")
-                    continue
+    raw_events = []
+    MAX_FILE_SIZE_MB = 100
 
-                file_ext = file.name.split('.')[-1].lower()
+    if run_log_analysis or uploaded_files or (raw_text_input and raw_text_input.strip()):
+        with st.spinner("Parsing and normalizing inputs..."):
+            
+            # 1. Process Files
+            if uploaded_files:
+                for file in uploaded_files:
+                    if file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                        st.error(f"❌ File '{file.name}' exceeds maximum size of {MAX_FILE_SIZE_MB}MB.")
+                        continue
 
-                try:
-                    content_str = content_bytes.decode("utf-8", errors="ignore")
-                except Exception as e:
-                    st.error(f"❌ Failed to decode file '{file.name}': {e}")
-                    continue
+                    content_bytes = file.getvalue()
+                    if not content_bytes or not content_bytes.strip():
+                        st.warning(f"⚠️ File '{file.name}' is empty. Skipping.")
+                        continue
 
-                if file_ext == "json":
-                    parsed = MultiFormatParser.parse_json(content_str)
-                    if not parsed:
-                        # Fallback to text parsing if JSON structure fails
-                        parsed = MultiFormatParser.parse_text_stream(content_str, default_source=file.name)
-                    raw_events.extend(parsed)
+                    file_ext = file.name.split('.')[-1].lower()
+                    try:
+                        content_str = content_bytes.decode("utf-8", errors="ignore")
+                    except Exception as e:
+                        st.error(f"❌ Failed to decode file '{file.name}': {e}")
+                        continue
 
-                elif file_ext == "csv":
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-                        tmp.write(content_bytes)
-                        tmp_path = Path(tmp.name)
-                    raw_events.extend(MultiFormatParser.parse_csv(tmp_path))
+                    if file_ext == "json":
+                        parsed = MultiFormatParser.parse_json(content_str)
+                        if not parsed:
+                            parsed = MultiFormatParser.parse_text_stream(content_str, default_source=file.name)
+                        raw_events.extend(parsed)
 
-                else:
-                    # General Text, Log, Auth, Syslog Handling
-                    raw_events.extend(MultiFormatParser.parse_text_stream(content_str, default_source=file.name))
+                    elif file_ext == "csv":
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                            tmp.write(content_bytes)
+                            tmp_path = Path(tmp.name)
+                        raw_events.extend(MultiFormatParser.parse_csv(tmp_path))
 
-        # Process Direct Text Area Input with Validation
-        if raw_text_input and raw_text_input.strip():
-            text_parsed = MultiFormatParser.parse_text_stream(raw_text_input.strip(), default_source="Pasted Text")
-            raw_events.extend(text_parsed)
+                    else:
+                        raw_events.extend(MultiFormatParser.parse_text_stream(content_str, default_source=file.name))
 
-    # Check for parse results after validation
-    if not raw_events:
-        st.error("❌ Invalid or unparseable input provided. Please verify log format.")
-    else:
-        st.success(f"Successfully normalized **{len(raw_events)}** canonical log events.")
+            # 2. Process Direct Text Input
+            if raw_text_input and raw_text_input.strip():
+                text_parsed = MultiFormatParser.parse_text_stream(raw_text_input.strip(), default_source="Pasted Log Text")
+                raw_events.extend(text_parsed)
 
-        # --- EXECUTION ENGINE PIPELINE ---
-        detection_engine = DetectionEngine(DEFAULT_RULES)
-        matches = detection_engine.evaluate(raw_events)
-
-        correlation_engine = CorrelationEngine()
-        incidents = correlation_engine.correlate(matches)
-
-        ioc_extractor = IOCExtractor()
-
-        for inc in incidents:
-            inc.iocs = ioc_extractor.extract(inc.events)
-            ScoringEngine.process(inc)
-
-        if not incidents:
-            st.warning("No suspicious security behavior or multi-event threat correlations detected.")
+        if not raw_events:
+            st.error("❌ No parseable log data found. Please enter valid log text.")
         else:
-            inc_map = {inc.incident_id: inc for inc in incidents}
-            selected_id = st.sidebar.selectbox("Select Correlated Incident Story", list(inc_map.keys()))
-            selected_inc = inc_map[selected_id]
+            st.success(f"Successfully normalized **{len(raw_events)}** canonical event lines.")
 
-            # Metric Overview Cards
-            mcol1, mcol2, mcol3, mcol4 = st.columns(4)
-            mcol1.metric("Severity Level", selected_inc.severity_label)
-            mcol2.metric("Risk Score", selected_inc.severity_score)
-            mcol3.metric("Confidence", f"{selected_inc.confidence_score}%")
-            mcol4.metric("Extracted IOCs", len(selected_inc.iocs))
+            # Processing Pipeline
+            detection_engine = DetectionEngine(DEFAULT_RULES)
+            matches = detection_engine.evaluate(raw_events)
 
-            st.markdown("---")
+            correlation_engine = CorrelationEngine()
+            incidents = correlation_engine.correlate(matches)
 
-            # Executive Briefing
-            st.subheader("📋 Executive Briefing & Incident Overview")
-            st.info(selected_inc.executive_summary)
+            ioc_extractor = IOCExtractor()
 
-            # Plotly Visual Charts
-            gcol1, gcol2 = st.columns([1, 2])
+            for inc in incidents:
+                inc.iocs = ioc_extractor.extract(inc.events)
+                ScoringEngine.process(inc)
 
-            with gcol1:
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=selected_inc.severity_score,
-                    domain={'x': [0, 1], 'y': [0, 1]},
-                    title={'text': "Incident Risk Score Gauge"},
-                    gauge={
-                        'axis': {'range': [0, 120]},
-                        'bar': {'color': "#f85149"},
-                        'steps': [
-                            {'range': [0, 30], 'color': "#3fb950"},
-                            {'range': [30, 70], 'color': "#d29922"},
-                            {'range': [70, 120], 'color': "#f85149"}
-                        ]
-                    }
-                ))
-                fig_gauge.update_layout(template="plotly_dark", height=280)
-                st.plotly_chart(fig_gauge, use_container_width=True)
+            if not incidents:
+                st.warning("No correlation matches triggered. Raw events displayed below.")
+                st.dataframe(pd.DataFrame([e.dict() for e in raw_events]))
+            else:
+                inc_map = {inc.incident_id: inc for inc in incidents}
+                selected_id = st.sidebar.selectbox("Select Correlated Incident", list(inc_map.keys()))
+                selected_inc = inc_map[selected_id]
 
-            with gcol2:
-                timeline_rows = [
-                    {
-                        "Timestamp": ev.timestamp,
-                        "Host": ev.host,
-                        "User": ev.username,
-                        "Source": ev.source_format,
-                        "Command/Details": ev.command_line or ev.process_name or "N/A"
-                    }
-                    for ev in selected_inc.events
-                ]
-                df_timeline = pd.DataFrame(timeline_rows)
+                # Metric Cards
+                mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+                mcol1.metric("Severity Level", selected_inc.severity_label)
+                mcol2.metric("Risk Score", selected_inc.severity_score)
+                mcol3.metric("Confidence", f"{selected_inc.confidence_score}%")
+                mcol4.metric("Extracted IOCs", len(selected_inc.iocs))
 
-                fig_timeline = px.scatter(
-                    df_timeline,
-                    x="Timestamp",
-                    y="Host",
-                    color="Source",
-                    hover_data=["User", "Command/Details"],
-                    title="Chronological Event Chain Timeline",
-                    template="plotly_dark"
-                )
-                fig_timeline.update_traces(marker=dict(size=14, symbol="diamond"))
-                fig_timeline.update_layout(height=280)
-                st.plotly_chart(fig_timeline, use_container_width=True)
+                st.markdown("---")
 
-            # Tabbed Technical Details
-            tab1, tab2, tab3, tab4 = st.tabs([
-                "⏱️ Interactive Timeline Data",
-                "🎯 MITRE ATT&CK Detections",
-                "🚨 Extracted IOCs",
-                "💡 Response Recommendations"
-            ])
+                # Executive Summary
+                st.subheader("📋 Executive Briefing")
+                st.info(selected_inc.executive_summary)
 
-            with tab1:
-                st.dataframe(df_timeline, use_container_width=True)
+                # Charts
+                gcol1, gcol2 = st.columns([1, 2])
 
-            with tab2:
-                det_df = pd.DataFrame([
-                    {
-                        "Rule ID": d.rule_id,
-                        "Rule Name": d.rule_name,
-                        "MITRE ID": d.mitre_id,
-                        "Tactic": d.mitre_tactic,
-                        "Description": d.description
-                    }
-                    for d in selected_inc.detections
+                with gcol1:
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=selected_inc.severity_score,
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        title={'text': "Incident Risk Score"},
+                        gauge={
+                            'axis': {'range': [0, 120]},
+                            'bar': {'color': "#f85149"},
+                            'steps': [
+                                {'range': [0, 30], 'color': "#3fb950"},
+                                {'range': [30, 70], 'color': "#d29922"},
+                                {'range': [70, 120], 'color': "#f85149"}
+                            ]
+                        }
+                    ))
+                    fig_gauge.update_layout(template="plotly_dark", height=280)
+                    st.plotly_chart(fig_gauge, use_container_width=True)
+
+                with gcol2:
+                    timeline_rows = [
+                        {
+                            "Timestamp": ev.timestamp,
+                            "Host": ev.host,
+                            "User": ev.username,
+                            "Source": ev.source_format,
+                            "Details": ev.command_line or ev.process_name or "N/A"
+                        }
+                        for ev in selected_inc.events
+                    ]
+                    df_timeline = pd.DataFrame(timeline_rows)
+
+                    fig_timeline = px.scatter(
+                        df_timeline,
+                        x="Timestamp",
+                        y="Host",
+                        color="Source",
+                        hover_data=["User", "Details"],
+                        title="Chronological Attack Chain",
+                        template="plotly_dark"
+                    )
+                    fig_timeline.update_traces(marker=dict(size=14, symbol="diamond"))
+                    fig_timeline.update_layout(height=280)
+                    st.plotly_chart(fig_timeline, use_container_width=True)
+
+                # Details Tabs
+                tab1, tab2, tab3, tab4 = st.tabs([
+                    "⏱️ Timeline Data",
+                    "🎯 MITRE Detections",
+                    "🚨 Extracted IOCs",
+                    "💡 Recommendations"
                 ])
-                st.table(det_df)
 
-            with tab3:
-                if selected_inc.iocs:
-                    ioc_df = pd.DataFrame([
-                        {"IOC Type": i.type, "Indicator Value": i.value, "Context": i.context}
-                        for i in selected_inc.iocs
+                with tab1:
+                    st.dataframe(df_timeline, use_container_width=True)
+
+                with tab2:
+                    det_df = pd.DataFrame([
+                        {
+                            "Rule ID": d.rule_id,
+                            "Rule Name": d.rule_name,
+                            "MITRE ID": d.mitre_id,
+                            "Tactic": d.mitre_tactic,
+                            "Description": d.description
+                        }
+                        for d in selected_inc.detections
                     ])
-                    st.table(ioc_df)
-                else:
-                    st.write("No IOCs extracted from this incident.")
+                    st.table(det_df)
 
-            with tab4:
-                st.subheader("Automated Containment Guidance")
-                for rec in set(selected_inc.recommendations):
-                    st.warning(f"• {rec}")
+                with tab3:
+                    if selected_inc.iocs:
+                        ioc_df = pd.DataFrame([
+                            {"IOC Type": i.type, "Indicator Value": i.value, "Context": i.context}
+                            for i in selected_inc.iocs
+                        ])
+                        st.table(ioc_df)
+                    else:
+                        st.write("No IOCs extracted from this incident.")
 
-else:
-    st.info("👈 Upload log files or paste raw text logs into the sidebar to begin automated investigation.")
+                with tab4:
+                    st.subheader("Automated Containment Guidance")
+                    for rec in set(selected_inc.recommendations):
+                        st.warning(f"• {rec}")
+    else:
+        st.info("👈 Paste text logs or upload log files in the sidebar and click 'Run Log Analysis Engine'.")
+
+# ==============================================================================
+# SECTION 2: EMAIL & FILE THREAT INSPECTOR
+# ==============================================================================
+with nav_tab2:
+    st.header("🔎 Malicious Email & Artifact Inspector")
+    st.write("Upload suspicious email files (`.eml`, `.msg`), scripts, executables, or attachments for automated malicious analysis.")
+
+    threat_file = st.file_uploader(
+        "Upload Email file or Artifact to Inspect",
+        type=None,
+        key="threat_file_uploader"
+    )
+
+    if threat_file:
+        file_bytes = threat_file.getvalue()
+        res = ThreatScanner.analyze_file(threat_file.name, file_bytes)
+
+        st.markdown("---")
+        tcol1, tcol2, tcol3 = st.columns(3)
+        tcol1.metric("Analysis Status", res["status"])
+        tcol2.metric("Threat Score", f"{res['score']} / 100")
+        tcol3.metric("File Size", f"{res['size_bytes']} Bytes")
+
+        if res["email_metadata"]:
+            st.subheader("📧 Email Header Metadata")
+            st.json(res["email_metadata"])
+
+        st.subheader("🔑 File Hashes")
+        st.code(f"SHA256: {res['sha256']}\nMD5:    {res['md5']}", language="text")
+
+        st.subheader("⚠️ Threat Detection Findings")
+        if res["findings"]:
+            for finding in res["findings"]:
+                st.error(f"• {finding}")
+        else:
+            st.success("No immediate threat indicators found in this file.")
