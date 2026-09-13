@@ -1,6 +1,7 @@
 """
 AttackLens - Automated Attack Timeline Reconstruction & Incident Investigation Engine
 Full Self-Contained Web Platform Application with Email/File Threat Scanner
+Enhanced Cyberpunk & SOC Animated Visual Styling
 """
 
 import re
@@ -518,12 +519,10 @@ class ThreatScanner:
             score += 40
             findings.append(f"Dangerous or executable extension detected: '{ext}'")
 
-        # Check binary signatures (e.g., Executable header MZ)
         if content.startswith(b'MZ'):
             score += 30
             findings.append("Executable magic header (MZ) detected in binary content.")
 
-        # Email Inspection (.eml or .msg)
         email_metadata = None
         if ext in ['.eml', '.msg', '.txt'] or b"Received:" in content[:500]:
             try:
@@ -537,13 +536,11 @@ class ThreatScanner:
                 body = msg.get_body(preferencelist=('plain', 'html'))
                 body_text = body.get_content() if body else ""
 
-                # Extract URLs in body
                 urls = re.findall(r"https?://[^\s<>\"']+", body_text)
                 if urls:
                     findings.append(f"Extracted {len(urls)} link(s) from email body.")
                     score += 15
 
-                # Check subject keywords
                 subj = str(msg.get("subject", "")).lower()
                 for kw in cls.SUSPICIOUS_KEYWORDS:
                     if kw in subj:
@@ -566,7 +563,7 @@ class ThreatScanner:
         }
 
 # ==============================================================================
-# 5. STREAMLIT WEB INTERFACE
+# 5. STREAMLIT WEB INTERFACE WITH ADVANCED ANIMATIONS & STYLING
 # ==============================================================================
 
 st.set_page_config(
@@ -576,16 +573,126 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- CYBERPUNK ANIMATED CSS & DETAILED BACKGROUND ---
 st.markdown("""
     <style>
-    .main { background-color: #0d1117; color: #c9d1d9; }
-    .stMetric { background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; }
-    .stAlert { background-color: #161b22; border-left: 4px solid #58a6ff; }
+    /* 1. Dynamic Cyber Grid Animated Background */
+    .stApp {
+        background-color: #090d16;
+        background-image: 
+            linear-gradient(rgba(88, 166, 255, 0.05) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(88, 166, 255, 0.05) 1px, transparent 1px);
+        background-size: 35px 35px;
+        background-position: -1px -1px;
+        animation: gridMove 25s linear infinite;
+        color: #c9d1d9;
+    }
+
+    @keyframes gridMove {
+        0% { background-position: 0 0; }
+        100% { background-position: 35px 35px; }
+    }
+
+    /* 2. Entrance Keyframe Animations */
+    @keyframes fadeInUp {
+        from {
+            opacity: 0;
+            transform: translateY(20px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @keyframes glowPulse {
+        0% { box-shadow: 0 0 5px rgba(88, 166, 255, 0.2), inset 0 0 5px rgba(88, 166, 255, 0.1); }
+        50% { box-shadow: 0 0 20px rgba(88, 166, 255, 0.5), inset 0 0 10px rgba(88, 166, 255, 0.3); }
+        100% { box-shadow: 0 0 5px rgba(88, 166, 255, 0.2), inset 0 0 5px rgba(88, 166, 255, 0.1); }
+    }
+
+    /* 3. Animated Sidebar Styling */
+    section[data-testid="stSidebar"] {
+        background-color: #0d1117 !important;
+        border-right: 1px solid rgba(88, 166, 255, 0.2) !important;
+        box-shadow: 5px 0 15px rgba(0, 0, 0, 0.5);
+    }
+
+    /* 4. Animated Metric Cards */
+    div[data-testid="stMetric"] {
+        background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
+        border: 1px solid rgba(88, 166, 255, 0.3);
+        border-radius: 12px;
+        padding: 16px;
+        animation: fadeInUp 0.6s ease-out forwards, glowPulse 4s infinite ease-in-out;
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-6px) scale(1.02);
+        border-color: #58a6ff !important;
+        box-shadow: 0 10px 25px rgba(88, 166, 255, 0.4) !important;
+    }
+
+    /* 5. Custom Animated Primary Action Button */
+    div.stButton > button {
+        background: linear-gradient(90deg, #1f6beb, #238636, #1f6beb);
+        background-size: 200% auto;
+        color: #ffffff !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 12px 24px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.5px;
+        transition: 0.5s !important;
+        box-shadow: 0 4px 15px rgba(31, 107, 235, 0.4);
+    }
+
+    div.stButton > button:hover {
+        background-position: right center !important;
+        transform: scale(1.04) translateY(-2px);
+        box-shadow: 0 6px 20px rgba(35, 134, 54, 0.6) !important;
+    }
+
+    /* 6. Animated Nav Tabs */
+    button[data-baseweb="tab"] {
+        transition: all 0.3s ease-in-out !important;
+        border-radius: 8px 8px 0 0 !important;
+        padding: 10px 20px !important;
+    }
+
+    button[data-baseweb="tab"]:hover {
+        background-color: rgba(88, 166, 255, 0.1) !important;
+        color: #58a6ff !important;
+        transform: translateY(-2px);
+    }
+
+    /* 7. Glowing Callout & Briefing Boxes */
+    .stAlert {
+        animation: fadeInUp 0.8s ease-out;
+        border-left: 4px solid #58a6ff !important;
+        border-radius: 8px !important;
+        background-color: #161b22 !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    /* 8. Dataframe Table Containers */
+    div[data-testid="stDataFrame"] {
+        animation: fadeInUp 0.9s ease-out;
+        border-radius: 10px;
+        border: 1px solid rgba(48, 54, 61, 0.8);
+        overflow: hidden;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🛡️ AttackLens SOC Investigation Engine")
-st.caption("Automated Incident Timeline Reconstruction & Malicious Threat Inspection")
+# Custom Animated Header
+st.markdown("""
+    <div style="animation: fadeInUp 0.5s ease-out;">
+        <h1 style="color: #58a6ff; text-shadow: 0 0 10px rgba(88, 166, 255, 0.4);">🛡️ AttackLens SOC Investigation Engine</h1>
+        <p style="color: #8b949e; font-size: 1.1rem;">Automated Incident Timeline Reconstruction & Cyber Threat Intelligence</p>
+    </div>
+""", unsafe_allow_html=True)
 
 # Navigation Tabs
 nav_tab1, nav_tab2 = st.tabs(["📊 Incident Log Reconstruction", "🔍 Email & File Threat Inspector"])
@@ -716,7 +823,12 @@ with nav_tab1:
                             ]
                         }
                     ))
-                    fig_gauge.update_layout(template="plotly_dark", height=280)
+                    fig_gauge.update_layout(
+                        template="plotly_dark",
+                        height=280,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)"
+                    )
                     st.plotly_chart(fig_gauge, use_container_width=True)
 
                 with gcol2:
@@ -738,11 +850,15 @@ with nav_tab1:
                         y="Host",
                         color="Source",
                         hover_data=["User", "Details"],
-                        title="Chronological Attack Chain",
+                        title="Chronological Attack Chain Timeline",
                         template="plotly_dark"
                     )
                     fig_timeline.update_traces(marker=dict(size=14, symbol="diamond"))
-                    fig_timeline.update_layout(height=280)
+                    fig_timeline.update_layout(
+                        height=280,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)"
+                    )
                     st.plotly_chart(fig_timeline, use_container_width=True)
 
                 # Details Tabs
